@@ -1,0 +1,32 @@
+asif_node:
+  ros__parameters:
+    mav_id: 1
+    mass: 0.70
+    gravity: 9.80665
+    asif_alpha: 100.0
+    obstacle_info:
+      p_obs: [1,0,1,-1,0,1]
+      r_obs: [0.1, 0.1]
+    backup_controller:
+      kp: 1
+      kv: 1
+      roll_kp: 1
+      pitch_kp: 1
+      yaw_kp: 1
+    thrust_model:
+      mav_min_thrust: 0.1079 # collective thrust
+      mav_max_thrust: 33.9212 # collective thrust
+
+mav_control_router:
+  ros__parameters:
+    mass: 0.70
+    gravity: 9.80665
+    position_controller:
+      kp: 1
+      kv: 1
+      roll_kp: 1
+      pitch_kp: 1
+      yaw_kp: 1
+    thrust_model:
+      mav_min_thrust: 0.1079 # collective thrust
+      mav_max_thrust: 33.9212 # collective thrust
