@@ -50,17 +50,17 @@ target_include_directories(mav_asif_util PUBLIC
         )
 target_link_libraries(mav_asif_util Eigen3::Eigen OsqpEigen::OsqpEigen ${rclcpp_LIBRARIES} ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES})
 
-add_library(mav_control_router SHARED src/lib/mav_control_router.cpp)
-ament_target_dependencies(mav_control_router Eigen3 rclcpp px4_msgs mav_asif_msgs px4_ros_com)
-target_include_directories(mav_control_router PUBLIC
+add_library(mav_avoidance_control_router SHARED src/lib/mav_avoidance_control_router.cpp)
+ament_target_dependencies(mav_avoidance_control_router Eigen3 rclcpp px4_msgs mav_asif_msgs px4_ros_com)
+target_include_directories(mav_avoidance_control_router PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/${PROJECT_NAME}>
         $<INSTALL_INTERFACE:include/${PROJECT_NAME}>
         ${Eigen3_INCLUDE_DIRS}
         )
-target_link_libraries(mav_control_router Eigen3::Eigen OsqpEigen::OsqpEigen ${rclcpp_LIBRARIES} mav_asif_util ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES})
+target_link_libraries(mav_avoidance_control_router Eigen3::Eigen OsqpEigen::OsqpEigen ${rclcpp_LIBRARIES} mav_asif_util ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES})
 
-add_executable(mav_obstacle_avoidance_node src/mav_control_router_node.cpp)
-target_link_libraries(mav_obstacle_avoidance_node mav_control_router)
+add_executable(mav_obstacle_avoidance_node src/mav_obstacle_avoidance_node.cpp)
+target_link_libraries(mav_obstacle_avoidance_node mav_avoidance_control_router)
 
 install(TARGETS mav_obstacle_avoidance_node
         DESTINATION lib/${PROJECT_NAME})

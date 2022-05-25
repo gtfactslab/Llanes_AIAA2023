@@ -41,30 +41,34 @@ public:
 			: Node("mav_asif_node")
 	{
 		osqp_solver_.settings()->setWarmStart(true);
+        osqp_solver_.settings()->setMaxIteration(100);
 		osqp_solver_.data()->setNumberOfVariables(NUM_CONTROL_INPUTS);
 		Eigen::SparseMatrix<double> control_size_identity_matrix(NUM_CONTROL_INPUTS,NUM_CONTROL_INPUTS);
 		control_size_identity_matrix.setIdentity();
 		osqp_solver_.data()->setHessianMatrix(control_size_identity_matrix);
+
 		try {
 			this->declare_parameter("mass");
 			this->declare_parameter("gravity");
+			this->declare_parameter("asif_alpha");
 			this->declare_parameter("backup_controller.kp");
 			this->declare_parameter("backup_controller.kv");
 			this->declare_parameter("backup_controller.roll_kp");
 			this->declare_parameter("backup_controller.pitch_kp");
 			this->declare_parameter("backup_controller.yaw_kp");
-			this->declare_parameter("thrust_model.mav_max_thrust");
-			this->declare_parameter("thrust_model.mav_min_thrust");
-			this->declare_parameter("asif_alpha");
+			this->declare_parameter("backup_controller.time_horizon");
+            this->declare_parameter("backup_controller.dt");
 
-			this->get_parameter("mass", mass_);
-			this->get_parameter("gravity", gravity_);
-			this->get_parameter("backup_controller.kp", kp_);
-			this->get_parameter("backup_controller.kv", kv_);
-			this->get_parameter("backup_controller.roll_kp", roll_kp_);
-			this->get_parameter("backup_controller.pitch_kp", pitch_kp_);
-			this->get_parameter("backup_controller.yaw_kp", yaw_kp_);
-			this->get_parameter("asif_alpha", asif_alpha_);
+			this->get_parameter("mass",mass_);
+			this->get_parameter("gravity",gravity_);
+			this->get_parameter("asif_alpha",asif_alpha_);
+			this->get_parameter("backup_controller.kp",kp_);
+			this->get_parameter("backup_controller.kv",kv_);
+			this->get_parameter("backup_controller.roll_kp",roll_kp_);
+			this->get_parameter("backup_controller.pitch_kp",pitch_kp_);
+			this->get_parameter("backup_controller.yaw_kp",yaw_kp_);
+			this->get_parameter("backup_controller.time_horizon",backup_time_horizon_);
+            this->get_parameter("backup_controller.dt",dt_backup_);
 
 		} catch (rclcpp::ParameterTypeException &excp) {
 			RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Parameter type exception caught");
@@ -91,23 +95,23 @@ private:
 	double yaw_kp_;
 	double asif_alpha_;
 
-	double quad_max_thrust_body_;
-    double quad_min_thrust_body_;
-
 	Eigen::Matrix<double, NUM_STATES, 1> fx_;
 	Eigen::Matrix<double, NUM_STATES, NUM_CONTROL_INPUTS> gx_;
 	OsqpEigen::Solver osqp_solver_;
 	Eigen::MatrixXd DGamma_;
 	Eigen::SparseMatrix<double> constraints_matrix_;
 	Eigen::VectorXd upper_bound_;
+	Eigen::VectorXd lower_bound_;
 	control_vector_t qp_gradient_;
 	control_vector_t asif_control_;
 
 	double dt_backup_;
-	int backup_horizon_; // number of backup steps of dt_backup_ backup_time = backup_horizon_*dt_backup_
+	int backup_time_horizon_;
+
+	bool solver_initialized_{false};
 
 	void update_state(state_vector_t& x, const control_vector_t& u) const;
-	control_vector_t backup_control(const state_vector_t& x) const;
+	control_vector_t backup_control(const state_vector_t& x, const position_t& p_des) const;
 	static Eigen::VectorXd barrier_function(const state_vector_t& x, const Vector3dMap& p_obs, const Eigen::VectorXd& r_obs, const size_t& num_obs);
 	static VectorStateMap gradient_barrier_function(const VectorStateMap& x, const Vector3dMap& p_obs, const size_t& num_obs);
 	state_jacobian_t jacobian(const state_vector_t& x, const control_vector_t& u, const position_t& p_des) const;

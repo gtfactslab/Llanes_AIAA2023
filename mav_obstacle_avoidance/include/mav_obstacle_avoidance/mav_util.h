@@ -4,7 +4,7 @@
 
 namespace asif
 {
-#define NUM_STATES 8
+#define NUM_STATES 9
 #define NUM_CONTROL_INPUTS 4
 #define POWER_OF_TWO(EXPONENT) (1 << (EXPONENT))
 

@@ -37,12 +37,12 @@ int MavAsif::solve(const px4_msgs::msg::VehicleOdometry &mav,
 	fx_(0) = mav.vx;
 	fx_(1) = mav.vy;
 	fx_(2) = mav.vz;
-	fx_(5) = -gravity_;
+	fx_(5) = gravity_;
 
     gx_.setZero();
-    gx_(3, 0) = (sphi*spsi + cphi*cpsi*stheta);
-    gx_(4, 0) = -(cpsi*sphi - cphi*spsi*stheta);
-    gx_(5, 0) = cphi*ctheta;
+    gx_(3, 0) = -(sphi*spsi + cphi*cpsi*stheta);
+    gx_(4, 0) = (cpsi*sphi - cphi*spsi*stheta);
+    gx_(5, 0) = -cphi*ctheta;
     gx_(6,1) = 1.0;
 	gx_(6,2) = sphi*tantheta;
 	gx_(6,3) = cphi*tantheta;
@@ -73,28 +73,29 @@ int MavAsif::solve(const px4_msgs::msg::VehicleOdometry &mav,
 	sensitivity_matrix.setIdentity();
 
 	MatrixStateSensitivityMap sensitivity_matrix_obs_map;
-	for(auto & itr : sensitivity_matrix_obs_map){
-		itr.second = sensitivity_matrix;
-	}
+	for (size_t j = 0; j < num_obs; j++) {
+        sensitivity_matrix_obs_map.insert({j, sensitivity_matrix});
+        worst_state.insert({j, x});
+    }
 
-    for (int i = 0; i <= backup_horizon_; i++) {
-
-		std::cout << i << ", ";
+    for (int i = 0; i < backup_time_horizon_; i++) {
 	    hx = barrier_function(x,p_obs,r_obs,num_obs);
 		for (size_t j = 0; j < num_obs; j++) {
 			if (hx(j) < hx_min(j)) {
 				hx_min(j) = hx(j);
-				worst_state.insert({j, x});
+				worst_state.at(j) = x;
 				sensitivity_matrix_obs_map.at(j) = sensitivity_matrix;
 			}
 		}
 
-        if (i != backup_horizon_) {
-        	control = backup_control(x);
+        if (i != backup_time_horizon_-1) {
+        	control = backup_control(x, p_des);
 	        sensitivity_matrix = jacobian(x,control,p_des) * sensitivity_matrix * dt_backup_ + sensitivity_matrix;
 	        update_state(x,control);
         }
     }
+
+    std::cout << hx_min <<std::endl;
 
 	VectorStateMap dhdx_map = gradient_barrier_function(worst_state, p_obs, num_obs);
 
@@ -108,7 +109,7 @@ int MavAsif::solve(const px4_msgs::msg::VehicleOdometry &mav,
 	constraints_matrix_ = (-DGamma_ * gx_).sparseView();
 
 	upper_bound_.resize(num_obs);
-	upper_bound_ = DGamma_ * fx_ + asif_alpha_ * hx;
+	upper_bound_ = DGamma_ * fx_ + asif_alpha_ * VectorXd(hx_min.array().pow(3));
 
 	osqp_solver_.data()->setNumberOfConstraints(num_obs);
 
@@ -117,20 +118,30 @@ int MavAsif::solve(const px4_msgs::msg::VehicleOdometry &mav,
 					-mav_control.pitch_rate,
 					-mav_control.yaw_rate;
 
-	if(!osqp_solver_.data()->setGradient(qp_gradient_)) return SET_DATA_ERROR;
-	if(!osqp_solver_.data()->setLinearConstraintsMatrix(constraints_matrix_)) return SET_DATA_ERROR;
-	if(!osqp_solver_.data()->setUpperBound(upper_bound_)) return SET_DATA_ERROR;
+	lower_bound_.resize(num_obs);
+    lower_bound_ = VectorXd::Constant(num_obs,1,-INFINITY);
 
-	if(!osqp_solver_.initSolver()) return INITIALIZE_PROBLEM_ERROR;
+    if (!solver_initialized_) {
+        if(!osqp_solver_.data()->setGradient(qp_gradient_)) return SET_DATA_ERROR;
+        if(!osqp_solver_.data()->setLinearConstraintsMatrix(constraints_matrix_)) return SET_DATA_ERROR;
+        if(!osqp_solver_.data()->setUpperBound(upper_bound_)) return SET_DATA_ERROR;
+        if(!osqp_solver_.data()->setLowerBound(lower_bound_)) return SET_DATA_ERROR;
+        if(!osqp_solver_.initSolver()) return INITIALIZE_PROBLEM_ERROR;
+        solver_initialized_ = true;
+    } else {
+        if(!osqp_solver_.updateBounds(lower_bound_, upper_bound_)) return SET_DATA_ERROR;
+        if(!osqp_solver_.updateLinearConstraintsMatrix(constraints_matrix_)) return SET_DATA_ERROR;
+        if(!osqp_solver_.updateGradient(qp_gradient_)) return SET_DATA_ERROR;
+    }
 
 	if(osqp_solver_.solveProblem() != OsqpEigen::ErrorExitFlag::NoError) return SOLVE_ERROR;
 
 	asif_control_ = osqp_solver_.getSolution();
-	mav_control.thrust = asif_control_(0) * mass_;
+	mav_control.thrust = asif_control_(0);
 	mav_control.roll_rate = asif_control_(1);
 	mav_control.pitch_rate = asif_control_(2);
 	mav_control.yaw_rate = asif_control_(3);
-
+    std::cout << "u_asif = " <<mav_control.thrust << ", " << mav_control.roll_rate << ", " << mav_control.pitch_rate << ", " << mav_control.yaw_rate<< std::endl;
     const auto end = std::chrono::steady_clock::now();
 
 	computation_time = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
@@ -150,9 +161,9 @@ void MavAsif::update_state(state_vector_t& x, const control_vector_t& u) const {
 	dxdt <<  vx,
              vy,
              vz,
-			 u(0)*(sin(phi)*sin(psi) + cos(phi)*cos(psi)*sin(theta)),
-             -u(0)*(cos(psi)*sin(phi) - cos(phi)*sin(psi)*sin(theta)),
-			 u(0)*cos(phi)*cos(theta) - gravity_,
+			 -u(0)*(sin(phi)*sin(psi) + cos(phi)*cos(psi)*sin(theta)),
+             u(0)*(cos(psi)*sin(phi) - cos(phi)*sin(psi)*sin(theta)),
+             gravity_ - u(0)*cos(phi)*cos(theta),
 			 u(1) + u(3)*cos(phi)*tan(theta) + u(2)*sin(phi)*tan(theta),
 			 u(2)*cos(phi) - u(3)*sin(phi),
 			 (u(3)*cos(phi))/cos(theta) + (u(2)*sin(phi))/cos(theta);
@@ -160,7 +171,7 @@ void MavAsif::update_state(state_vector_t& x, const control_vector_t& u) const {
 	x = x + dxdt*dt_backup_;
 }
 
-control_vector_t MavAsif::backup_control(const state_vector_t& x) const{
+control_vector_t MavAsif::backup_control(const state_vector_t& x, const position_t& p_des) const{
 	double px = x(0);
 	double py = x(1);
 	double pz = x(2);
@@ -171,21 +182,19 @@ control_vector_t MavAsif::backup_control(const state_vector_t& x) const{
 	double theta = x(7);
 	double psi = x(8);
 
-	position_t p_des(px,py,pz);
-
 	double ax = kp_ * (p_des.x() - px) - kv_ * vx;
 	double ay = kp_ * (p_des.y() - py) - kv_ * vy;
-	double az = kp_ * (p_des.z() - pz) + gravity_ - kv_ * vz;
+	double az = kp_ * (p_des.z() - pz) - gravity_ - kv_ * vz;
 
 	Vector3d acc_vec(ax,ay,az);
 	double acc_mag = acc_vec.norm();
 	Vector3d acc_dir = acc_vec.normalized();
 
 	Vector3d interm_force_frame1 = dcm(0,0,psi) * acc_dir;
-	double theta_cmd = atan(interm_force_frame1(1)/(interm_force_frame1(3)));
+    double theta_cmd = atan2(-interm_force_frame1.x(),-interm_force_frame1.z());
 
 	Vector3d interm_force_frame2 = dcm(0,theta_cmd,0) * interm_force_frame1;
-	double phi_cmd = atan(-interm_force_frame2(2)/(interm_force_frame2(3)));
+    double phi_cmd = atan2(interm_force_frame2.y(),-interm_force_frame2.z());
 
 	double wx = -roll_kp_ * (phi - phi_cmd);
 	double wy = -pitch_kp_ * (theta - theta_cmd);
@@ -216,7 +225,7 @@ VectorStateMap MavAsif::gradient_barrier_function(const VectorStateMap& x, const
 	for (size_t i = 0; i < num_obs; i++) {
 		p_quad << x.at(i).x(), x.at(i).y(), x.at(i).z();
 		p_tild = p_quad - p_obs.at(i);
-		dhdx << 2.0 *  p_tild.transpose() * Matrix3d::Identity(), 0., 0., 0., 0., 0., 0.;
+		dhdx << (2.0 *  p_tild.transpose() * Matrix3d::Identity()).transpose(), 0., 0., 0., 0., 0., 0.;
 		dhdx_map.insert({i, dhdx});
 	}
 	return dhdx_map;
@@ -256,20 +265,20 @@ state_jacobian_t MavAsif::jacobian(const state_vector_t& x, const control_vector
 
 	double ax = kp_ * (p_des.x() - px) - kv_ * vx;
 	double ay = kp_ * (p_des.y() - py) - kv_ * vy;
-	double az = kp_ * (p_des.z() - pz) + gravity_ - kv_ * vz;
+	double az = kp_ * (p_des.z() - pz) - gravity_ - kv_ * vz;
 
 	dfdx.setZero();
 	dfdx(0,3) = 1.0;
 	dfdx(1,4) = 1.0;
 	dfdx(2, 5) = 1.0;
-	dfdx(3,6) = coll_acc*(cphi*spsi - cpsi*sphi*stheta);
-	dfdx(3,7) = coll_acc*cphi*cpsi*ctheta;
-	dfdx(3,8) = coll_acc*(cpsi*sphi - cphi*spsi*stheta);
-	dfdx(4,6) = -coll_acc*(cphi*cpsi + sphi*spsi*stheta);
-	dfdx(4,7) = coll_acc*cphi*ctheta*spsi;
-	dfdx(4,8) = coll_acc*(sphi*spsi + cphi*cpsi*stheta);
-	dfdx(5,6) = -coll_acc*ctheta*sphi;
-	dfdx(5,7) = -coll_acc*cphi*stheta;
+	dfdx(3,6) = -coll_acc*(cphi*spsi - cpsi*sphi*stheta);
+	dfdx(3,7) = -coll_acc*cphi*cpsi*ctheta;
+	dfdx(3,8) = -coll_acc*(cpsi*sphi - cphi*spsi*stheta);
+	dfdx(4,6) = coll_acc*(cphi*cpsi + sphi*spsi*stheta);
+	dfdx(4,7) = -coll_acc*cphi*ctheta*spsi;
+	dfdx(4,8) = -coll_acc*(sphi*spsi + cphi*cpsi*stheta);
+	dfdx(5,6) = coll_acc*ctheta*sphi;
+	dfdx(5,7) = coll_acc*cphi*stheta;
 	dfdx(6,6) = wy*cphi*tantheta - wz*sphi*tantheta;
 	dfdx(6,7) = wz*cphi*secant_theta_squared + wy*sphi*secant_theta_squared;
 	dfdx(7,6) = -wz*cphi - wy*sphi;
@@ -277,9 +286,9 @@ state_jacobian_t MavAsif::jacobian(const state_vector_t& x, const control_vector
 	dfdx(8,7) = (wz*cphi*stheta)*secant_theta_squared + (wy*sphi*stheta)*secant_theta_squared;
 
 	dfdu.setZero();
-	dfdu(3,0) = sphi*spsi + cphi*cpsi*stheta;
-	dfdu(4,0) = cphi*spsi*stheta - cpsi*sphi;
-	dfdu(5,0) = cphi*ctheta;
+	dfdu(3,0) = -sphi*spsi - cphi*cpsi*stheta;
+	dfdu(4,0) = -cphi*spsi*stheta + cpsi*sphi;
+	dfdu(5,0) = -cphi*ctheta;
 	dfdu(6,1) = 1.0;
 	dfdu(6,2) = sphi*tantheta;
 	dfdu(6,3) = cphi*tantheta;

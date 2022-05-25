@@ -1,4 +1,4 @@
-#include "mav_control_router.hpp"
+#include "mav_avoidance_control_router.hpp"
 #include <utility>
 #include "Eigen/Dense"
 #include <px4_ros_com/frame_transforms.h>
@@ -14,10 +14,8 @@ using namespace px4_msgs::msg;
 using namespace asif;
 
 MavControlRouter::MavControlRouter()
-        : Node("mav_control_router") {
+        : Node("mav_avoidance_control_router") {
     // ----------------------- Parameter Initialization ------------------
-
-
     this->declare_parameter("mav_id");
 	this->declare_parameter("mass");
 	this->declare_parameter("gravity");
@@ -103,27 +101,31 @@ MavControlRouter::MavControlRouter()
                         }
                         if (mav_channels_.channels[POSITION_SETPOINT_CHANNEL - 1] >= 0.75) {
 	                        is_static_reference_ = true;
-	                        p_des_ << 1., 0., 0.5;
                         } else {
                         	if(is_static_reference_) {
-		                        reference_time_ = rclcpp::Time(0);
-		                        is_static_reference_ = false;
+		                        reference_time_ = rclcpp::Time(1000*timestamp_.load());
                         	}
-                        	double time = reference_time_.seconds();
-	                        p_des_ << cos(0.5*time), sin(0.5*time), 0.5;
+	                        is_static_reference_ = false;
                         }
                     });
     mav_estimator_odometry_sub_ =
-            this->create_subscription<VehicleOdometry>("mav0/fmu/vehicle_odometry/out", 10,
+            this->create_subscription<VehicleOdometry>("mav" + std::to_string(mav_id_) + "/fmu/vehicle_odometry/out", 10,
                                                        [this](const VehicleOdometry::UniquePtr msg) {
                                                            mav_odom_ = *msg;
                                                        });
 #ifdef RUN_SITL
 	mav_channels_.channels[OFFBOARD_ENABLE_CHANNEL - 1] = 1.0;
-	mav_channels_.channels[POSITION_SETPOINT_CHANNEL - 1] = 0.0;
+	mav_channels_.channels[POSITION_SETPOINT_CHANNEL - 1] = 1.0;
 #endif
     auto timer_callback = [this]() -> void
     {
+	    if(is_static_reference_) {
+		    p_des_ << 0.5, 0.0, -0.5;
+	    } else {
+		    double time = (rclcpp::Time(1000*timestamp_.load()) - reference_time_).seconds();
+		    p_des_ << 0.5*cos(0.2*time), 0.5*sin(0.2*time), -0.5;
+	    }
+
         position_controller(p_des_);
         set_control();
     };
@@ -132,13 +134,15 @@ MavControlRouter::MavControlRouter()
 #ifdef RUN_SITL
 	auto asif_activate_callback = [this]() -> void
 		{
-            mav_channels_.channels[ASIF_ENABLE_CHANNEL - 1] = 1.0;
-			mav_channels_.channels[POSITION_SETPOINT_CHANNEL - 1] = 1.0;
+//            mav_channels_.channels[ASIF_ENABLE_CHANNEL - 1] = 1.0;
+//			mav_channels_.channels[POSITION_SETPOINT_CHANNEL - 1] = 0.0;
+			is_static_reference_ = false;
 			asif_enabled_ = true;
+		    reference_time_ = rclcpp::Time(1000*timestamp_.load());
 			asif_activate_timer_->cancel();
 			asif_activate_timer_->reset();
 		};
-    asif_activate_timer_ = create_wall_timer(30s, asif_activate_callback);
+    asif_activate_timer_ = create_wall_timer(20s, asif_activate_callback);
 #endif
 }
 
@@ -242,7 +246,7 @@ void MavControlRouter::publish_control() {
         vehicle_rates.roll = mav_control_.roll_rate;
         vehicle_rates.pitch = mav_control_.pitch_rate;
         vehicle_rates.yaw = mav_control_.yaw_rate;
-        vehicle_rates.thrust_body[2] = -compute_relative_thrust(mav_control_.thrust);
+        vehicle_rates.thrust_body[2] = -compute_relative_thrust(mav_control_.thrust * mass_);
 
         publish_offboard_control_mode();
         vehicle_rates_setpoint_pub_->publish(vehicle_rates);
@@ -268,19 +272,19 @@ void MavControlRouter::position_controller(const position_t& p_des) {
 
 	double ax = kp_ * (p_des.x() - px) - kv_ * vx;
 	double ay = kp_ * (p_des.y() - py) - kv_ * vy;
-	double az = kp_ * (p_des.z() - pz) + gravity_ - kv_ * vz;
+	double az = kp_ * (p_des.z() - pz) - gravity_ - kv_ * vz;
 
 	Eigen::Vector3d acc_vec(ax,ay,az);
 	double acc_mag = acc_vec.norm();
 	Eigen::Vector3d acc_dir = acc_vec.normalized();
 
-	Eigen::Vector3d interm_force_frame1 = dcm(0,0,psi) * acc_dir;
-	double theta_cmd = atan(interm_force_frame1(1)/(interm_force_frame1(3)));
+	Eigen::Vector3d interm_force_frame1 = dcm(0, 0, psi) * acc_dir;
+	double theta_cmd = atan2(-interm_force_frame1.x(),-interm_force_frame1.z());
 
-	Eigen::Vector3d interm_force_frame2 = dcm(0,theta_cmd,0) * interm_force_frame1;
-	double phi_cmd = atan(-interm_force_frame2(2)/(interm_force_frame2(3)));
+	Eigen::Vector3d interm_force_frame2 = dcm(0, theta_cmd, 0) * interm_force_frame1;
+	double phi_cmd = atan2(interm_force_frame2.y(),-interm_force_frame2.z());
 
-	mav_control_.thrust = acc_mag * mass_;
+	mav_control_.thrust = acc_mag;
 	mav_control_.roll_rate = -roll_kp_ * (phi - phi_cmd);
 	mav_control_.pitch_rate = -pitch_kp_ * (theta - theta_cmd);
 	mav_control_.yaw_rate = -yaw_kp_ * psi;
@@ -288,7 +292,7 @@ void MavControlRouter::position_controller(const position_t& p_des) {
 
 double MavControlRouter::compute_relative_thrust(const double &collective_thrust) const {
 #ifdef RUN_SITL
-	double rel_thrust = (collective_thrust - mav_min_thrust) / (mav_max_thrust - mav_min_thrust);
+	double rel_thrust = (collective_thrust - mav_min_thrust_) / (mav_max_thrust_ - mav_min_thrust_);
 	return (0.54358075 * rel_thrust + 0.25020242 * sqrt(3.6484 * rel_thrust + 0.00772641) - 0.021992793);
 #else
 	if (mav_battery_status_.voltage_filtered_v > 14.0) {
